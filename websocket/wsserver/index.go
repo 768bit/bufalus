@@ -42,12 +42,15 @@ type StubHandler func(userUUID string, sessionID string, jwtTicketID string, met
 
 type BasicHandler func(conn *websocket.Conn, mt WebsocketMessageType, reqID string, payload interface{}) error
 
+type RPCHandler func(userUUID string, sessionID string, jwtTicketID string, cmd string, payload interface{}, options map[string]interface{}) (interface{}, error)
+
 type WebSocketServer struct {
 	sessions        map[string]*WSSession
 	authProvider    IAuthProvider
 	sessionProvider ISessionProvider
 	stubHandler     StubHandler
 	basicHandler    BasicHandler
+	rpcHandler      RPCHandler
 	isBasic         bool
 }
 
@@ -70,6 +73,12 @@ func NewBasicWebSocketServer(handler BasicHandler) *WebSocketServer {
 		basicHandler: handler,
 		isBasic:      true,
 	}
+
+}
+
+func (ws *WebSocketServer) RegisterRPCHandler(handler RPCHandler) {
+
+	ws.rpcHandler = handler
 
 }
 
@@ -203,6 +212,30 @@ func (ws *WebSocketServer) processJSONRequest(conn *websocket.Conn, data []byte)
 				return errors.New("Cannot start a session against a simple WebSocket server")
 			}
 			return ws.newWSSession(conn, requestBody.ID, requestBody.Payload["userUUID"].(string), requestBody.Payload["jwtTicketID"].(string))
+		case go_wsutils.RPCMessage:
+			if ws.isBasic {
+				return errors.New("Cannot start a session against a simple WebSocket server")
+			}
+			if wssesh := ws.sessions[requestBody.SeshKey]; wssesh == nil {
+
+				return errors.New("Unable to get session with that key")
+
+			} else {
+
+				log.Print("Attempting RPC call via RPCHandler")
+
+				responsePayload, err := ws.rpcHandler(wssesh.userUUID, wssesh.sessionID, wssesh.jwtTicketID, requestBody.Cmd,
+					requestBody.Payload, requestBody.Options)
+				if err != nil {
+
+					return go_wsutils.SendJSONMessage(conn, go_wsutils.NewWebSocketRPCErrorResponseBody(go_wsutils.RPCStatusError,
+						requestBody.SeshKey, requestBody.ID, requestBody.Cmd, responsePayload, err))
+				} else {
+					//package and send response...
+					return go_wsutils.SendJSONMessage(conn, go_wsutils.NewWebSocketRPCResponseBody(go_wsutils.RPCStatusOK,
+						requestBody.SeshKey, requestBody.ID, requestBody.Cmd, responsePayload))
+				}
+			}
 		case go_wsutils.HTTPMessage:
 			//retrieve the wssession
 			if ws.isBasic {
