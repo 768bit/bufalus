@@ -3,11 +3,11 @@ package jsclient
 import (
 	"encoding/json"
 	"errors"
+	"github.com/768bit/go_wsutils"
 	"github.com/768bit/gopherws/websocketjs"
 	"github.com/768bit/vutils"
 	"github.com/gopherjs/gopherjs/js"
 	"github.com/gopherjs/jsbuiltin"
-	"gitlab.768bit.com/vann/libvann/vannws_utils"
 	"log"
 	"net/url"
 )

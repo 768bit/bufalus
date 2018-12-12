@@ -2,10 +2,10 @@ package bufalus
 
 import (
 	"fmt"
+	"github.com/768bit/bufalus/websocket/wsserver"
 	"github.com/768bit/packr"
 	"github.com/gobuffalo/buffalo"
 	"github.com/gorilla/sessions"
-	"gitlab.768bit.com/vann/libvann/bufalus/websocket/wsserver"
 	"log"
 	"net/http"
 	"os"

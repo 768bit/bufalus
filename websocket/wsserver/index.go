@@ -3,11 +3,11 @@ package wsserver
 import (
 	"encoding/json"
 	"errors"
+	"github.com/768bit/go_wsutils"
 	"github.com/768bit/vutils"
+	"github.com/768bit/websocket"
 	"github.com/gobuffalo/buffalo"
 	"github.com/google/uuid"
-	"gitlab.768bit.com/vann/libvann/vannws_utils"
-	"gitlab.768bit.com/vann/websocket"
 	"log"
 	"net/http"
 	"time"

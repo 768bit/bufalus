@@ -3,9 +3,9 @@ package client
 import (
 	"encoding/json"
 	"errors"
+	"github.com/768bit/go_wsutils"
 	"github.com/768bit/vutils"
-	"gitlab.768bit.com/vann/libvann/vannws_utils"
-	"gitlab.768bit.com/vann/websocket"
+	"github.com/768bit/websocket"
 	"log"
 	"net/url"
 )
