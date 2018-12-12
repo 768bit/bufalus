@@ -1,6 +1,6 @@
 package wsserver
 
-type IUserStoreProvider interface {
+type ISessionProvider interface {
 	UseJWTTicketForUser(userUUID string, jwtTicketID string) (bool, string)
 }
 

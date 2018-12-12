@@ -43,22 +43,22 @@ type StubHandler func(userUUID string, sessionID string, jwtTicketID string, met
 type BasicHandler func(conn *websocket.Conn, mt WebsocketMessageType, reqID string, payload interface{}) error
 
 type WebSocketServer struct {
-	sessions          map[string]*WSSession
-	authProvider      IAuthProvider
-	userStoreProvider IUserStoreProvider
-	stubHandler       StubHandler
-	basicHandler      BasicHandler
-	isBasic           bool
+	sessions        map[string]*WSSession
+	authProvider    IAuthProvider
+	sessionProvider ISessionProvider
+	stubHandler     StubHandler
+	basicHandler    BasicHandler
+	isBasic         bool
 }
 
-func NewWebSocketServer(authProvider IAuthProvider, userStoreProvider IUserStoreProvider, stubHandler StubHandler) *WebSocketServer {
+func NewWebSocketServer(authProvider IAuthProvider, sessionProvider ISessionProvider, stubHandler StubHandler) *WebSocketServer {
 
 	return &WebSocketServer{
-		sessions:          map[string]*WSSession{},
-		authProvider:      authProvider,
-		userStoreProvider: userStoreProvider,
-		stubHandler:       stubHandler,
-		isBasic:           false,
+		sessions:        map[string]*WSSession{},
+		authProvider:    authProvider,
+		sessionProvider: sessionProvider,
+		stubHandler:     stubHandler,
+		isBasic:         false,
 	}
 
 }
@@ -165,7 +165,7 @@ func (ws *WebSocketServer) processReceiveMessage(conn *websocket.Conn, mt int, d
 		if ws.isBasic {
 			return ws.basicHandler(conn, BinaryMessage, "", data)
 		}
-		return vannws_utils.HandleByteStream(conn, data)
+		return go_wsutils.HandleByteStream(conn, data)
 		//case websocket.CloseMessage:
 		//handle close message - the client has requested a close go ahead and action that...
 
@@ -182,7 +182,7 @@ func (ws *WebSocketServer) processJSONRequest(conn *websocket.Conn, data []byte)
 
 	//marshall the request into the Request Fromat
 
-	var requestBody vannws_utils.WebSocketRequestBody
+	var requestBody go_wsutils.WebSocketRequestBody
 
 	if err := json.Unmarshal(data, &requestBody); err != nil {
 
@@ -197,13 +197,13 @@ func (ws *WebSocketServer) processJSONRequest(conn *websocket.Conn, data []byte)
 		//now we have the payload lets look at it..
 
 		switch requestBody.MessageType {
-		case vannws_utils.RPCSessionStartMessage:
+		case go_wsutils.RPCSessionStartMessage:
 			//we need to begin a session
 			if ws.isBasic {
 				return errors.New("Cannot start a session against a simple WebSocket server")
 			}
 			return ws.newWSSession(conn, requestBody.ID, requestBody.Payload["userUUID"].(string), requestBody.Payload["jwtTicketID"].(string))
-		case vannws_utils.HTTPMessage:
+		case go_wsutils.HTTPMessage:
 			//retrieve the wssession
 			if ws.isBasic {
 				return errors.New("Cannot start a session against a simple WebSocket server")
@@ -226,12 +226,12 @@ func (ws *WebSocketServer) processJSONRequest(conn *websocket.Conn, data []byte)
 					return err
 				} else {
 					//package and send response...
-					return vannws_utils.SendJSONMessage(conn, vannws_utils.NewWebSocketHttpResponseBody(vannws_utils.RPCStatusOK,
+					return go_wsutils.SendJSONMessage(conn, go_wsutils.NewWebSocketHttpResponseBody(go_wsutils.RPCStatusOK,
 						requestBody.SeshKey, requestBody.ID, requestBody.Method, requestBody.Path, responsePayload))
 				}
 
 			}
-		case vannws_utils.BasicMessage:
+		case go_wsutils.BasicMessage:
 			if ws.isBasic {
 				return ws.basicHandler(conn, TextMessage, requestBody.ID, requestBody.Payload)
 			}
@@ -244,10 +244,10 @@ func (ws *WebSocketServer) processJSONRequest(conn *websocket.Conn, data []byte)
 
 }
 
-func NewWebSocketServerHelloResponseMessage() vannws_utils.WebSocketResponseBody {
-	return vannws_utils.WebSocketResponseBody{
-		MessageType: vannws_utils.ServerHelloMessage,
-		StatusCode:  vannws_utils.RPCStatusOK,
+func NewWebSocketServerHelloResponseMessage() go_wsutils.WebSocketResponseBody {
+	return go_wsutils.WebSocketResponseBody{
+		MessageType: go_wsutils.ServerHelloMessage,
+		StatusCode:  go_wsutils.RPCStatusOK,
 	}
 }
 
@@ -257,7 +257,7 @@ func sendConnectionBeginMessage(conn *websocket.Conn) error {
 
 	//no need for a req object here.. we wont wait for a response - we will just start processing any messages from the client immediately
 
-	return vannws_utils.SendJSONMessage(conn, NewWebSocketServerHelloResponseMessage())
+	return go_wsutils.SendJSONMessage(conn, NewWebSocketServerHelloResponseMessage())
 
 }
 
@@ -269,7 +269,7 @@ func (ws *WebSocketServer) newWSSession(conn *websocket.Conn, requestID string, 
 
 	//need to claim the ticket first...
 
-	if claimed, seshID := ws.userStoreProvider.UseJWTTicketForUser(userUUID, jwtTicketID); claimed == true && seshID != "" {
+	if claimed, seshID := ws.sessionProvider.UseJWTTicketForUser(userUUID, jwtTicketID); claimed == true && seshID != "" {
 
 		//we have claimed the token initialise a session for the user...
 
@@ -298,7 +298,7 @@ func (ws *WebSocketServer) newWSSession(conn *websocket.Conn, requestID string, 
 				jwtTicketID:  jwtTicketID,
 			}
 
-			return vannws_utils.SendJSONMessage(conn, vannws_utils.NewWebSocketSessionStartResponseBody(requestID, seshKeyStr))
+			return go_wsutils.SendJSONMessage(conn, go_wsutils.NewWebSocketSessionStartResponseBody(requestID, seshKeyStr))
 
 		}
 
