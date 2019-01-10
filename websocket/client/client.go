@@ -15,15 +15,15 @@ type WebSocketClient struct {
 	host        string
 	scheme      string
 	path        string
-	reqStack    map[string]*vannws_utils.WSRequest
-	reqQueue    []*vannws_utils.WSRequest
+	reqStack    map[string]*go_wsutils.WSRequest
+	reqQueue    []*go_wsutils.WSRequest
 	ReadyChan   chan bool
 	doneChan    chan bool
 	errChan     chan error
 	ready       bool
 	connected   bool
 	authorised  bool
-	session     *vannws_utils.WSClientSession
+	session     *go_wsutils.WSClientSession
 	jwtTicketID string
 }
 
@@ -33,11 +33,11 @@ func NewWebSocketClient(scheme string, host string, path string) *WebSocketClien
 		scheme:     scheme,
 		host:       host,
 		path:       path,
-		reqStack:   map[string]*vannws_utils.WSRequest{},
+		reqStack:   map[string]*go_wsutils.WSRequest{},
 		ReadyChan:  make(chan bool),
 		ready:      false,
 		connected:  false,
-		reqQueue:   []*vannws_utils.WSRequest{},
+		reqQueue:   []*go_wsutils.WSRequest{},
 		authorised: false,
 	}
 
@@ -76,7 +76,7 @@ func (wsc *WebSocketClient) ConnectWS(jwtTicketID string, doneChan chan bool, er
 			}
 			switch mt {
 			case websocket.BinaryMessage:
-				vannws_utils.HandleByteStream(wsc.conn, message)
+				go_wsutils.HandleByteStream(wsc.conn, message)
 			case websocket.TextMessage:
 				//handle text message (json)
 			case websocket.CloseMessage:
@@ -96,9 +96,9 @@ func (wsc *WebSocketClient) handleReceiveJSON(conn *websocket.Conn, data []byte)
 
 	//need to figure out what the basic parameters are (message type, request id etc..)
 
-	//coerce to the vannws_utils.WebSocketResponseBody type
+	//coerce to the go_wsutils.WebSocketResponseBody type
 
-	var responseBody vannws_utils.WebSocketResponseBody
+	var responseBody go_wsutils.WebSocketResponseBody
 
 	if err := json.Unmarshal(data, &responseBody); err != nil {
 
@@ -110,7 +110,7 @@ func (wsc *WebSocketClient) handleReceiveJSON(conn *websocket.Conn, data []byte)
 
 		switch responseBody.MessageType {
 
-		case vannws_utils.ServerHelloMessage:
+		case go_wsutils.ServerHelloMessage:
 			wsc.connected = true
 			wsc.ready = true
 			//immediately negotiate a session so we can ready the client
@@ -125,14 +125,14 @@ func (wsc *WebSocketClient) handleReceiveJSON(conn *websocket.Conn, data []byte)
 
 }
 
-func (wsc *WebSocketClient) processJSONResponse(conn *websocket.Conn, response *vannws_utils.WebSocketResponseBody) {
+func (wsc *WebSocketClient) processJSONResponse(conn *websocket.Conn, response *go_wsutils.WebSocketResponseBody) {
 
 	//need to verify the session etc...
 
 }
 
 func (wsc *WebSocketClient) SendRpcRequest(modURI string, cmd string, path string, payload map[string]interface{},
-	options map[string]interface{}, headers map[string]string) (*vannws_utils.WSRequest, error) {
+	options map[string]interface{}, headers map[string]string) (*go_wsutils.WSRequest, error) {
 
 	//generate an ID for the request
 
@@ -158,8 +158,8 @@ func (wsc *WebSocketClient) SendRpcRequest(modURI string, cmd string, path strin
 
 	}
 
-	reqBody := vannws_utils.WebSocketRequestBody{
-		MessageType: vannws_utils.RPCMessage,
+	reqBody := go_wsutils.WebSocketRequestBody{
+		MessageType: go_wsutils.RPCMessage,
 		Cmd:         cmd,
 		ID:          reqID,
 		SeshKey:     wsc.conn.GetSeshKey(),
@@ -172,16 +172,16 @@ func (wsc *WebSocketClient) SendRpcRequest(modURI string, cmd string, path strin
 
 	//create the item on the request stack...
 
-	wsc.reqStack[reqID] = vannws_utils.NewWSRequest(reqID, wsc.conn.GetSeshKey(), &reqBody)
+	wsc.reqStack[reqID] = go_wsutils.NewWSRequest(reqID, wsc.conn.GetSeshKey(), &reqBody)
 
-	vannws_utils.SendJSONRequest(reqID, wsc.conn, reqBody, wsc.reqStack[reqID])
+	go_wsutils.SendJSONRequest(reqID, wsc.conn, reqBody, wsc.reqStack[reqID])
 
 	return wsc.reqStack[reqID], nil
 
 }
 
 func (wsc *WebSocketClient) SendHttpRequest(method string, path string, payload map[string]interface{},
-	options map[string]interface{}, headers map[string]string) (*vannws_utils.WSRequest, error) {
+	options map[string]interface{}, headers map[string]string) (*go_wsutils.WSRequest, error) {
 
 	if !wsc.connected {
 
@@ -205,8 +205,8 @@ func (wsc *WebSocketClient) SendHttpRequest(method string, path string, payload 
 
 	}
 
-	reqBody := vannws_utils.WebSocketRequestBody{
-		MessageType: vannws_utils.HTTPMessage,
+	reqBody := go_wsutils.WebSocketRequestBody{
+		MessageType: go_wsutils.HTTPMessage,
 		Method:      method,
 		ID:          reqID,
 		SeshKey:     wsc.conn.GetSeshKey(),
@@ -218,9 +218,9 @@ func (wsc *WebSocketClient) SendHttpRequest(method string, path string, payload 
 
 	//create the item on the request stack...
 
-	wsc.reqStack[reqID] = vannws_utils.NewWSHttpRequest(reqID, wsc.conn.GetSeshKey(), &reqBody)
+	wsc.reqStack[reqID] = go_wsutils.NewWSHttpRequest(reqID, wsc.conn.GetSeshKey(), &reqBody)
 
-	vannws_utils.SendJSONRequest(reqID, wsc.conn, reqBody, wsc.reqStack[reqID])
+	go_wsutils.SendJSONRequest(reqID, wsc.conn, reqBody, wsc.reqStack[reqID])
 
 	return wsc.reqStack[reqID], nil
 
@@ -251,13 +251,13 @@ func (wsc *WebSocketClient) newWSSession() bool {
 
 	}
 
-	reqBody := vannws_utils.NewWebSocketSessionStartRequestBody(reqID, wsc.jwtTicketID, "")
+	reqBody := go_wsutils.NewWebSocketSessionStartRequestBody(reqID, wsc.jwtTicketID, "")
 
-	req := vannws_utils.NewWSRequestWithTimeout(reqID, wsc.conn.GetSeshKey(), reqBody, 15)
+	req := go_wsutils.NewWSRequestWithTimeout(reqID, wsc.conn.GetSeshKey(), reqBody, 15)
 
 	wsc.reqStack[reqID] = req
 
-	vannws_utils.SendJSONRequest(reqID, wsc.conn, reqBody, wsc.reqStack[reqID])
+	go_wsutils.SendJSONRequest(reqID, wsc.conn, reqBody, wsc.reqStack[reqID])
 
 	for {
 		select {
@@ -273,10 +273,10 @@ func (wsc *WebSocketClient) newWSSession() bool {
 
 			} else if req.Cancelled == true {
 
-			} else if resp.MessageType == vannws_utils.RPCSessionStartMessage && resp.StatusCode == vannws_utils.RPCStatusOK {
+			} else if resp.MessageType == go_wsutils.RPCSessionStartMessage && resp.StatusCode == go_wsutils.RPCStatusOK {
 				//handle the response as required...
 
-			} else if resp.MessageType == vannws_utils.RPCSessionStartErrorMessage {
+			} else if resp.MessageType == go_wsutils.RPCSessionStartErrorMessage {
 				//handle the response as required...
 
 			} else {

@@ -6,10 +6,12 @@ import (
 	"github.com/768bit/go_wsutils"
 	"github.com/768bit/vutils"
 	"github.com/768bit/websocket"
+	"github.com/cskr/pubsub"
 	"github.com/gobuffalo/buffalo"
 	"github.com/google/uuid"
 	"log"
 	"net/http"
+	"sync"
 	"time"
 )
 
@@ -28,21 +30,122 @@ func internalError(conn *websocket.Conn, msg string, err error) {
 }
 
 type WSSession struct {
-	key           uuid.UUID
-	keyString     string
-	userUUID      string
-	subscriptions map[string]string
-	expiry        time.Time
-	byteSessions  map[string]string
-	sessionID     string
-	jwtTicketID   string
+	ws             *WebSocketServer
+	conn           *websocket.Conn
+	key            uuid.UUID
+	keyString      string
+	userUUID       string
+	subscriptions  map[string]string
+	expiry         time.Time
+	byteSessions   map[string]string
+	sessionID      string
+	jwtTicketID    string
+	psMapMutex     *sync.Mutex
+	subMap         map[string]chan interface{}
+	subExitMap     map[string]chan bool
+	agg            chan *WSPublishMesssage
+	psExitChan     chan bool
+	hasSub         bool
+	subProcStarted bool
+}
+
+type WSPublishMesssage struct {
+	Topic string
+	Data  interface{}
+}
+
+func (wss *WSSession) runPubSubProcessor() {
+	if wss.subProcStarted {
+		return
+	}
+	wss.subProcStarted = true
+	wss.agg = make(chan *WSPublishMesssage)
+	go func() {
+		for {
+			select {
+			case <-wss.psExitChan:
+				//exit signal received - terminate all channels...
+				wss.psMapMutex.Lock()
+				for topic, _ := range wss.subMap {
+					wss.unSubscribe(topic)
+				}
+				wss.hasSub = false
+				wss.subProcStarted = false
+				close(wss.agg)
+				wss.psMapMutex.Unlock()
+				return
+			case msg := <-wss.agg:
+				wss.psMapMutex.Lock()
+				if err := go_wsutils.SendJSONMessage(wss.conn, go_wsutils.NewWebSocketPublishBody(go_wsutils.RPCStatusOK,
+					wss.keyString, msg.Topic, msg.Data)); err != nil {
+					log.Println("Error Sending Publish Messsage:", err)
+				}
+				wss.psMapMutex.Unlock()
+			}
+		}
+	}()
+}
+
+func (wss *WSSession) Subscribe(topic string) {
+	wss.psMapMutex.Lock()
+	defer wss.psMapMutex.Unlock()
+	if v, ok := wss.subMap[topic]; !ok || v == nil {
+		log.Println("Subscribing", wss.userUUID, "to", topic)
+		wss.subMap[topic] = wss.ws.pubsub.Sub(topic)
+		wss.subExitMap[topic] = make(chan bool)
+		if !wss.hasSub {
+			wss.hasSub = true
+		}
+		if !wss.subProcStarted {
+			wss.runPubSubProcessor()
+		}
+		go func(topic string, recvChan chan interface{}, aggCh chan *WSPublishMesssage, exitChan chan bool) {
+			for {
+				select {
+				case <-exitChan:
+					close(exitChan)
+					delete(wss.subExitMap, topic)
+					return
+				case msg := <-recvChan:
+					am := &WSPublishMesssage{
+						Topic: topic,
+						Data:  msg,
+					}
+					aggCh <- am
+				}
+			}
+		}(topic, wss.subMap[topic], wss.agg, wss.subExitMap[topic])
+	}
+}
+
+func (wss *WSSession) UnSubscribe(topic string) {
+	wss.psMapMutex.Lock()
+	defer wss.psMapMutex.Unlock()
+	wss.unSubscribe(topic)
+	if len(wss.subMap) == 0 {
+		if wss.subProcStarted {
+			wss.psExitChan <- true
+		}
+	}
+}
+
+func (wss *WSSession) unSubscribe(topic string) {
+	if v, ok := wss.subMap[topic]; !ok || v == nil {
+		return
+	} else {
+		log.Println("Unsubscribing", wss.userUUID, "from", topic)
+		wss.ws.pubsub.Unsub(wss.subMap[topic])
+		delete(wss.subMap, topic)
+		wss.subExitMap[topic] <- true
+		delete(wss.subExitMap, topic)
+	}
 }
 
 type StubHandler func(userUUID string, sessionID string, jwtTicketID string, method string, reqPath string, payload interface{}, options interface{}) (interface{}, error)
 
 type BasicHandler func(conn *websocket.Conn, mt WebsocketMessageType, reqID string, payload interface{}) error
 
-type RPCHandler func(userUUID string, sessionID string, jwtTicketID string, cmd string, payload interface{}, options map[string]interface{}) (interface{}, error)
+type RPCHandler func(req *go_wsutils.WebSocketRequestBody, cmd string, payload interface{}, options map[string]interface{}) (interface{}, error)
 
 type WebSocketServer struct {
 	sessions        map[string]*WSSession
@@ -52,6 +155,7 @@ type WebSocketServer struct {
 	basicHandler    BasicHandler
 	rpcHandler      RPCHandler
 	isBasic         bool
+	pubsub          *pubsub.PubSub
 }
 
 func NewWebSocketServer(authProvider IAuthProvider, sessionProvider ISessionProvider, stubHandler StubHandler) *WebSocketServer {
@@ -62,6 +166,7 @@ func NewWebSocketServer(authProvider IAuthProvider, sessionProvider ISessionProv
 		sessionProvider: sessionProvider,
 		stubHandler:     stubHandler,
 		isBasic:         false,
+		pubsub:          pubsub.New(10),
 	}
 
 }
@@ -72,6 +177,7 @@ func NewBasicWebSocketServer(handler BasicHandler) *WebSocketServer {
 		sessions:     map[string]*WSSession{},
 		basicHandler: handler,
 		isBasic:      true,
+		pubsub:       pubsub.New(10),
 	}
 
 }
@@ -79,6 +185,12 @@ func NewBasicWebSocketServer(handler BasicHandler) *WebSocketServer {
 func (ws *WebSocketServer) RegisterRPCHandler(handler RPCHandler) {
 
 	ws.rpcHandler = handler
+
+}
+
+func (ws *WebSocketServer) Publish(topic string, data interface{}) {
+
+	ws.pubsub.Pub(data, topic)
 
 }
 
@@ -101,16 +213,24 @@ func (ws *WebSocketServer) ServeWS() buffalo.Handler {
 		for {
 			mt, message, err := c.ReadMessage()
 			if err != nil {
-				log.Println("read:", err)
+				log.Println("read_error:", err)
+				if !ws.isBasic {
+					if seshKey := c.GetSeshKey(); seshKey != "" {
+						if wssesh := ws.sessions[seshKey]; wssesh == nil {
+							ws.closeWSSession(wssesh)
+						}
+					}
+				}
 				break
 			}
 			log.Printf("recv: %s -> %s", mt, message)
-			err = ws.processReceiveMessage(c, mt, message)
-			//err = c.WriteMessage(mt, message)
-			if err != nil {
-				log.Println("write:", err)
-				break
-			}
+			go func(imt int, imsg []byte) {
+				err = ws.processReceiveMessage(c, imt, imsg)
+				//err = c.WriteMessage(mt, message)
+				if err != nil {
+					log.Println("recv_proc_error:", err)
+				}
+			}(mt, message)
 		}
 	})
 }
@@ -133,16 +253,17 @@ func (ws *WebSocketServer) ServeBasicWSHandler() buffalo.Handler {
 		for {
 			mt, message, err := c.ReadMessage()
 			if err != nil {
-				log.Println("read:", err)
+				log.Println("read_error:", err)
 				break
 			}
 			log.Printf("recv: %s -> %s", mt, message)
-			err = ws.processReceiveMessage(c, mt, message)
-			//err = c.WriteMessage(mt, message)
-			if err != nil {
-				log.Println("write:", err)
-				break
-			}
+			go func(imt int, imsg []byte) {
+				err = ws.processReceiveMessage(c, imt, imsg)
+				//err = c.WriteMessage(mt, message)
+				if err != nil {
+					log.Println("recv_proc_error:", err)
+				}
+			}(mt, message)
 		}
 	})
 }
@@ -205,31 +326,76 @@ func (ws *WebSocketServer) processJSONRequest(conn *websocket.Conn, data []byte)
 
 		//now we have the payload lets look at it..
 
+		requestBody.SetConn(conn).CreateContext()
+
 		switch requestBody.MessageType {
 		case go_wsutils.RPCSessionStartMessage:
 			//we need to begin a session
 			if ws.isBasic {
 				return errors.New("Cannot start a session against a simple WebSocket server")
 			}
-			return ws.newWSSession(conn, requestBody.ID, requestBody.Payload["userUUID"].(string), requestBody.Payload["jwtTicketID"].(string))
+			if err := ws.newWSSession(conn, requestBody.ID, requestBody.Payload["userUUID"].(string), requestBody.Payload["jwtTicketID"].(string)); err != nil {
+				log.Println("Error Starting Session for", requestBody.Payload["userUUID"].(string), err)
+				return go_wsutils.SendJSONMessage(conn, go_wsutils.NewWebSocketSessionStartErrorResponseBody(requestBody.ID, go_wsutils.RPCStatusUnauthorised, err))
+			} else {
+				return nil
+			}
+		case go_wsutils.SubscribeMessage:
+			if ws.isBasic {
+				return errors.New("Cannot subscribe with a simple WebSocket server")
+			}
+			if wssesh := ws.sessions[requestBody.SeshKey]; wssesh == nil {
+
+				//try lookup the
+
+				err := errors.New("Unable to get session with that key")
+				return go_wsutils.SendJSONMessage(conn, go_wsutils.NewWebSocketSubscribeErrorResponseBody(go_wsutils.RPCStatusUnauthorised,
+					requestBody.SeshKey, requestBody.ID, requestBody.Topic, err.Error()))
+
+			} else {
+				wssesh.Subscribe(requestBody.Topic)
+				return go_wsutils.SendJSONMessage(conn, go_wsutils.NewWebSocketSubscribeResponseBody(go_wsutils.RPCStatusOK,
+					requestBody.SeshKey, requestBody.ID, requestBody.Topic))
+			}
+		case go_wsutils.UnSubscribeMessage:
+			if ws.isBasic {
+				return errors.New("Cannot unsubscribe with a simple WebSocket server")
+			}
+			if wssesh := ws.sessions[requestBody.SeshKey]; wssesh == nil {
+
+				//try lookup the
+
+				err := errors.New("Unable to get session with that key")
+				return go_wsutils.SendJSONMessage(conn, go_wsutils.NewWebSocketUnSubscribeErrorResponseBody(go_wsutils.RPCStatusUnauthorised,
+					requestBody.SeshKey, requestBody.ID, requestBody.Topic, err.Error()))
+
+			} else {
+				wssesh.UnSubscribe(requestBody.Topic)
+				return go_wsutils.SendJSONMessage(conn, go_wsutils.NewWebSocketUnSubscribeResponseBody(go_wsutils.RPCStatusOK,
+					requestBody.SeshKey, requestBody.ID, requestBody.Topic))
+			}
 		case go_wsutils.RPCMessage:
 			if ws.isBasic {
 				return errors.New("Cannot start a session against a simple WebSocket server")
 			}
 			if wssesh := ws.sessions[requestBody.SeshKey]; wssesh == nil {
 
-				return errors.New("Unable to get session with that key")
+				//try lookup the
+
+				err := errors.New("Unable to get session with that key")
+				return go_wsutils.SendJSONMessage(conn, go_wsutils.NewWebSocketRPCErrorResponseBody(go_wsutils.RPCStatusUnauthorised,
+					requestBody.SeshKey, requestBody.ID, requestBody.Cmd, nil, err.Error()))
 
 			} else {
 
 				log.Print("Attempting RPC call via RPCHandler")
 
-				responsePayload, err := ws.rpcHandler(wssesh.userUUID, wssesh.sessionID, wssesh.jwtTicketID, requestBody.Cmd,
-					requestBody.Payload, requestBody.Options)
-				if err != nil {
+				requestBody.SetSessionDetails(wssesh.sessionID, wssesh.userUUID, wssesh.jwtTicketID)
 
+				responsePayload, err := ws.rpcHandler(&requestBody, requestBody.Cmd, requestBody.Payload, requestBody.Options)
+				if err != nil {
 					return go_wsutils.SendJSONMessage(conn, go_wsutils.NewWebSocketRPCErrorResponseBody(go_wsutils.RPCStatusError,
-						requestBody.SeshKey, requestBody.ID, requestBody.Cmd, responsePayload, err))
+						requestBody.SeshKey, requestBody.ID, requestBody.Cmd, responsePayload, err.Error()))
 				} else {
 					//package and send response...
 					return go_wsutils.SendJSONMessage(conn, go_wsutils.NewWebSocketRPCResponseBody(go_wsutils.RPCStatusOK,
@@ -322,6 +488,12 @@ func (ws *WebSocketServer) newWSSession(conn *websocket.Conn, requestID string, 
 
 			conn.SetSeshKey(seshKeyStr)
 			ws.sessions[seshKeyStr] = &WSSession{
+				ws:           ws,
+				conn:         conn,
+				psExitChan:   make(chan bool),
+				subMap:       map[string]chan interface{}{},
+				subExitMap:   map[string]chan bool{},
+				psMapMutex:   &sync.Mutex{},
 				expiry:       time.Now().Add(time.Duration(15*60) * time.Second),
 				keyString:    seshKeyStr,
 				key:          *seshKey,
@@ -343,11 +515,13 @@ func (ws *WebSocketServer) newWSSession(conn *websocket.Conn, requestID string, 
 
 }
 
-func (ws *WebSocketServer) closeWSSession(conn *websocket.Conn) {
-
-	//clean up and close the connection...
-
-	//signal client that their sessions are terminated...
+func (ws *WebSocketServer) closeWSSession(wss *WSSession) {
+	log.Println("Closing WSSession", wss.keyString, "for", wss.userUUID)
+	if wss.hasSub {
+		log.Println("Cleaning WSSession Subscriptions:", len(wss.subMap))
+		wss.psExitChan <- true
+	}
+	delete(ws.sessions, wss.keyString)
 
 }
 
