@@ -6,6 +6,7 @@ import (
 	"github.com/768bit/packr"
 	"github.com/gobuffalo/buffalo"
 	"github.com/gorilla/sessions"
+  "github.com/gorilla/securecookie"
 	"log"
 	"net/http"
 	"os"
@@ -25,12 +26,14 @@ type Options struct {
 	SessionKey   string
 	BindAddress  string
 	Port         int
+	RootIsPublic bool
 }
 
 type App struct {
 	*BuffaloApp
 	rootFolder          string
 	primaryPublicFolder string
+	BOptions            *Options
 }
 
 func New(opts *Options) *App {
@@ -47,7 +50,7 @@ func New(opts *Options) *App {
 
 	if opts.Env == "development" || opts.Env == "development_build" || opts.Env == "production_build" || opts.Env == "test" || opts.Env == "testing" {
 		if opts.Env == "test" || opts.Env == "testing" {
-			buffaloEnv = "testing"
+			buffaloEnv = "development"
 		} else {
 			buffaloEnv = "development"
 		}
@@ -55,11 +58,24 @@ func New(opts *Options) *App {
 
 	log.Printf("Starting Bufalus HTTP Server in %s mode in CWD %s", opts.Env, cwd)
 
+	seshStore := &sessions.CookieStore{
+    Codecs: securecookie.CodecsFromPairs([]byte(opts.SessionKey)),
+    Options:&sessions.Options{
+      Path: "/",
+      Domain:"vann.dev",
+      Secure:true,
+      MaxAge:86400 * 30,
+    },
+  }
+
+	seshStore.MaxAge(seshStore.Options.MaxAge)
+
 	buffaloOpts := buffalo.Options{
 		Env:          buffaloEnv,
 		SessionName:  opts.SessionName,
-		SessionStore: sessions.NewCookieStore([]byte(opts.SessionKey)),
+		SessionStore: seshStore,
 		Addr:         fmt.Sprintf("%s:%d", opts.BindAddress, opts.Port),
+		WorkerOff:true,
 	}
 
 	ba := &App{
@@ -73,6 +89,8 @@ func New(opts *Options) *App {
 	}
 
 	log.Print("======== BUFALUS READY TO SERVE ========")
+
+	ba.BOptions = opts
 
 	return ba
 
